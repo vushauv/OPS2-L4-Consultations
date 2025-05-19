@@ -29,24 +29,104 @@ void usage(char* program_name)
     exit(EXIT_FAILURE);
 }
 
-int main(int argc, char** argv)
+void block_sigpipe()
 {
     sigset_t mask, oldmask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGPIPE);
     sigprocmask(SIG_BLOCK, &mask, &oldmask);
-
+}
+void get_and_check_args(int argc, char** argv, uint16_t* port)
+{
     if (argc != 2)
     {
         usage(argv[0]);
     }
-    uint16_t port;
-    port = atoi(argv[1]);
+    *port = atoi(argv[1]);
 
-    if (port <= 1023 || port >= 65535)
+    if (*port <= 1023 || *port >= 65535)
     {
         usage(argv[0]);
     }
+}
+
+void decline_new_user(int fd)
+{
+    if (write(fd, "Server is full\n", 16) < 0)
+    {
+        if (errno != EPIPE)
+        {
+            ERR("write");
+        }
+        if (TEMP_FAILURE_RETRY(close(fd)) < 0)
+            ERR("close");
+    }
+}
+
+void add_new_user_to_list(int client_socket, int epoll_ds, user_context* client_list, int* current_connections_number)
+{
+    user_context new_user_context = {
+        .offset = 0,
+        .user_fd = client_socket,
+    };
+
+    client_list[(*current_connections_number)] = new_user_context;
+    (*current_connections_number)++;
+    int size;
+
+    printf("[%d] connected\n", client_socket);
+    for (int i = 0; i < (*current_connections_number) - 1; i++)
+    {
+        if (write(client_socket, "User logging in...\n", 20) < 0)
+
+            if (errno != EPIPE)
+            {
+                ERR("write");
+            }
+    }
+
+    if (write(client_socket, "Please enter your username\n", 28) < 0)
+    {
+        if (errno != EPIPE)
+        {
+            ERR("write");
+        }
+    }
+
+    struct epoll_event user_event;
+    user_event.events = EPOLLIN;
+    user_event.data.fd = client_socket;
+    if (epoll_ctl(epoll_ds, EPOLL_CTL_ADD, client_socket, &user_event) == -1)
+    {
+        perror("epoll_ctl: listen_sock");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void known_user_handler(struct epoll_event client_event)
+{
+    char buf[MAX_MESSAGE_SIZE + 1] = {0};
+    int read_chars;
+    read_chars = read(client_event.data.fd, buf, MAX_MESSAGE_SIZE);
+    if (read_chars == 0)
+    {
+        if (TEMP_FAILURE_RETRY(close(client_event.data.fd)) < 0)
+            ERR("close");
+    }
+
+    if (read_chars < 0)
+    {
+        ERR("read");
+    }
+    printf("%s\n", buf);
+}
+
+int main(int argc, char** argv)
+{
+    block_sigpipe();
+
+    uint16_t port;
+    get_and_check_args(argc, argv, &port);
 
     int server_socket = bind_tcp_socket(port, 16);
 
@@ -85,75 +165,18 @@ int main(int argc, char** argv)
                 if (current_connections_number >= MAX_CLIENTS)
                 {
                     // we do not add a new user (the limit is exceeded)
-                    if (write(client_socket, "Server is full\n", 16) < 0)
-                    {
-                        if (errno != EPIPE)
-                        {
-                            ERR("write");
-                        }
-                        if (TEMP_FAILURE_RETRY(close(client_socket)) < 0)
-                            ERR("close");
-                    }
+                    decline_new_user(events[i].data.fd);
                 }
                 else
                 {
                     // we add a new user (the limit is not exceeded)
-                    user_context new_user_context = {
-                        .offset = 0,
-                        .user_fd = client_socket,
-                    };
-
-                    client_list[current_connections_number] = new_user_context;
-                    current_connections_number++;
-                    int size;
-
-                    printf("[%d] connected\n", client_socket);
-                    for (int i = 0; i < current_connections_number - 1; i++)
-                    {
-                        if (write(client_socket, "User logging in...\n", 20) < 0)
-
-                            if (errno != EPIPE)
-                            {
-                                ERR("write");
-                            }
-                    }
-
-                    if (write(client_socket, "Please enter your username\n", 28) < 0)
-                    {
-                        if (errno != EPIPE)
-                        {
-                            ERR("write");
-                        }
-                    }
-
-                    struct epoll_event user_event;
-                    user_event.events = EPOLLIN;
-                    user_event.data.fd = client_socket;
-                    if (epoll_ctl(epoll_ds, EPOLL_CTL_ADD, client_socket, &user_event) == -1)
-                    {
-                        perror("epoll_ctl: listen_sock");
-                        exit(EXIT_FAILURE);
-                    }
+                    add_new_user_to_list(client_socket, epoll_ds, client_list, &current_connections_number);
                 }
             }
             else
             {
                 // message from already connected user
-
-                char buf[MAX_MESSAGE_SIZE + 1] = {0};
-                int read_chars;
-                read_chars = read(events[i].data.fd, buf, MAX_MESSAGE_SIZE);
-                if (read_chars == 0)
-                {
-                    if (TEMP_FAILURE_RETRY(close(events[i].data.fd)) < 0)
-                        ERR("close");
-                }
-
-                if (read_chars < 0)
-                {
-                    ERR("read");
-                }
-                printf("%s\n", buf);
+                known_user_handler(events[i]);
             }
         }
     }
